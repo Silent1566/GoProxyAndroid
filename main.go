@@ -1,4 +1,5 @@
-// main.go - 移除panic恢复
+// 独立运行模式下的入口。
+// 这个文件用于直接启动一个本地 HTTP 代理服务，便于单独调试 Go 代理逻辑。
 package main
 
 import (
@@ -11,10 +12,12 @@ import (
 )
 
 func main() {
+	// 根路径用于最简单的存活探测。
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ok")
 	})
 
+	// /proxy 是核心代理入口，必须携带线程数、分块大小和目标地址。
 	http.HandleFunc("/proxy", func(w http.ResponseWriter, r *http.Request) {
 		params := r.URL.Query()
 		thread, chunkSize, url := params.Get("thread"), params.Get("chunkSize"), params.Get("url")
@@ -37,14 +40,14 @@ func main() {
 
 		player := NewPlayer(r.Header, t, c, url)
 
-		// 关键：不使用panic恢复，让错误正常返回
+		// 这里不做 panic 恢复，尽量把错误按正常流程返回并记录日志。
 		if err := player.Play(w, r.Context()); err != nil {
 			log.Printf("播放错误: %v", err)
-			// 已经开始写入数据，不要再写错误响应
+			// 一旦已经开始写响应体，就不要再额外写错误响应，避免破坏数据流。
 		}
 	})
 
-	// 添加健康检查端点
+	// 健康检查接口，方便上层轮询代理是否正常可用。
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status": "healthy", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))

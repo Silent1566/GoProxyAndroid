@@ -1,4 +1,8 @@
-// proxy.go - 基于原版优化
+// 代理核心逻辑：
+// 1. 解析客户端 Range 请求
+// 2. 先下载首块，确认总大小并回写响应头
+// 3. 按块并发拉取剩余数据
+// 4. 按顺序写回客户端，尽量保持流式输出
 package main
 
 import (
@@ -26,6 +30,8 @@ type Player struct {
 	url       string
 }
 
+// NewPlayer 根据上游请求头和代理参数创建一个下载器实例。
+// 这里只透传和目标源站关系最强的几个请求头，避免把无关头信息带过去。
 func NewPlayer(header http.Header, thread, chunkSizeKB int, url string) *Player {
 	h := http.Header{}
 	for _, key := range []string{"User-Agent", "Cookie", "Referer"} {
@@ -37,8 +43,10 @@ func NewPlayer(header http.Header, thread, chunkSizeKB int, url string) *Player 
 
 	return &Player{
 		client: &http.Client{
-			Timeout: 0, // 关键修复：移除全局超时
+			// 不设置整体超时，避免长视频或慢速源站被客户端统一截断。
+			Timeout: 0,
 			Transport: &http.Transport{
+				// 某些视频源证书配置不规范，这里保持兼容性优先。
 				TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
 				MaxIdleConns:          100,
 				MaxIdleConnsPerHost:   20,
@@ -60,8 +68,10 @@ func NewPlayer(header http.Header, thread, chunkSizeKB int, url string) *Player 
 	}
 }
 
+// Play 执行一次完整的代理传输。
+// 它会先发送首块和响应头，再并发获取剩余数据块并按顺序写回。
 func (p *Player) Play(w http.ResponseWriter, ctx context.Context) error {
-	// 下载第一个块
+	// 先下载首块，用于确认文件总大小并立即开始回传响应。
 	s, e, err := p.downloadFirst(w, ctx)
 	if err != nil {
 		return err
@@ -79,7 +89,7 @@ func (p *Player) Play(w http.ResponseWriter, ctx context.Context) error {
 	var wg sync.WaitGroup
 
 	for start := s; start < fileSize; start += int64(p.chunkSize) * int64(p.thread) {
-		// 检查取消
+		// 上层如果主动断开连接，这里尽快停止后续下载。
 		select {
 		case <-ctx.Done():
 			log.Printf("请求被取消")
@@ -88,7 +98,7 @@ func (p *Player) Play(w http.ResponseWriter, ctx context.Context) error {
 		}
 
 		activeThreads := 0
-		// 用于接收 goroutine 中的错误
+		// 每一轮批量并发下载都记录各自的错误，便于统一判断是否中断传输。
 		chunkErrors := make([]error, p.thread)
 
 		for i := 0; i < p.thread; i++ {
@@ -109,10 +119,11 @@ func (p *Player) Play(w http.ResponseWriter, ctx context.Context) error {
 			go func(idx int, cs, ce int64) {
 				defer wg.Done()
 
+				// 单个分块设置独立超时，避免某一块永久卡住拖死整轮任务。
 				downloadCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 				defer cancel()
 
-				// 添加重试逻辑
+				// 每个分块独立重试，提高弱网或不稳定源站下的成功率。
 				var data []byte
 				var err error
 				for retry := 0; retry < 3; retry++ {
@@ -126,6 +137,7 @@ func (p *Player) Play(w http.ResponseWriter, ctx context.Context) error {
 
 				if err != nil {
 					log.Printf("⚠️ 块 %d-%d 下载彻底失败: %v", cs, ce-1, err)
+					// 记录失败块，后面由主协程统一决定是否终止本次传输。
 					chunkErrors[idx] = fmt.Errorf("数据块 %d (%d-%d) 下载失败: %w", idx, cs, ce-1, err)
 					return
 				}
@@ -133,10 +145,10 @@ func (p *Player) Play(w http.ResponseWriter, ctx context.Context) error {
 			}(i, chunkStart, chunkEnd)
 		}
 
-		// 等待当前批次完成
+		// 当前这批块必须全部结束后，才能按顺序向客户端写出。
 		wg.Wait()
 
-		// 检查是否有块下载失败，重试全部失败后抛出错误
+		// 只要某块彻底失败，就直接中止，避免客户端拿到拼接不完整的数据流。
 		for i := 0; i < activeThreads; i++ {
 			if chunkErrors[i] != nil {
 				log.Printf("❌ %v", chunkErrors[i])
@@ -144,14 +156,14 @@ func (p *Player) Play(w http.ResponseWriter, ctx context.Context) error {
 			}
 		}
 
-		// 检查是否被取消
+		// 等待批量任务结束后再次确认调用方是否已经取消。
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		// 写入当前批次的数据
+		// 下载顺序可以并发，写出顺序必须稳定，否则客户端数据会错位。
 		for i := 0; i < activeThreads; i++ {
 			_, err = w.Write(results[i])
 			if err != nil {
@@ -168,11 +180,15 @@ func (p *Player) Play(w http.ResponseWriter, ctx context.Context) error {
 	return nil
 }
 
+// downloadFirst 下载首块数据，并根据源站返回的 Content-Range 确定完整文件大小。
+// 这个阶段还负责把响应头回写给客户端。
 func (p *Player) downloadFirst(w http.ResponseWriter, ctx context.Context) (int64, int64, error) {
 	start, end := p.start, p.end
 	if end <= 0 {
+		// 客户端没有给出明确结束位置时，先试探取一个较小首块。
 		end = 100
 	} else {
+		// Range 结束位是闭区间，这里转成内部处理更方便的开区间。
 		end += 1
 	}
 	end = start + min(end, p.chunkSize)
@@ -189,6 +205,7 @@ func (p *Player) downloadFirst(w http.ResponseWriter, ctx context.Context) (int6
 	totalLength, _ := strconv.ParseInt(matches[3], 10, 64)
 
 	if p.end <= 0 {
+		// 没指定结束位置时，默认拉取到源文件尾部。
 		end = totalLength - 1
 	} else {
 		end = p.end
@@ -211,6 +228,8 @@ func (p *Player) downloadFirst(w http.ResponseWriter, ctx context.Context) (int6
 	return start + int64(len(chunk)), end, nil
 }
 
+// downloadChunk 负责下载一个指定字节区间。
+// 返回值包括数据内容、响应头和状态码，方便上层首块逻辑复用。
 func (p *Player) downloadChunk(ctx context.Context, start, end int64, maxRetries int) ([]byte, http.Header, int, error) {
 	var lastErr error
 	for retry := 0; retry < maxRetries; retry++ {
@@ -225,6 +244,7 @@ func (p *Player) downloadChunk(ctx context.Context, start, end int64, maxRetries
 		if err != nil {
 			lastErr = err
 			if retry < maxRetries-1 {
+				// 简单退避，避免连续重试过于激进。
 				select {
 				case <-time.After(time.Duration(retry+1) * 500 * time.Millisecond):
 					continue
@@ -237,6 +257,7 @@ func (p *Player) downloadChunk(ctx context.Context, start, end int64, maxRetries
 		defer resp.Body.Close()
 
 		if resp.StatusCode == 206 || resp.StatusCode == 200 {
+			// 某些源站即使带了 Range 也会直接返回 200，这里一并兼容。
 			data, err := io.ReadAll(resp.Body)
 			if err != nil {
 				lastErr = err
@@ -254,6 +275,8 @@ func (p *Player) downloadChunk(ctx context.Context, start, end int64, maxRetries
 var crRegex = regexp.MustCompile(`bytes\s+(\d+)-(\d+)/(\d+)`)
 var seRegex = regexp.MustCompile(`bytes=(\d+)-(\d*)`)
 
+// parseRange 解析客户端传入的 Range 请求头。
+// 当请求头不存在或格式不匹配时，返回从 0 到文件末尾的默认语义。
 func parseRange(rangeStr string) (int64, int64) {
 	match := seRegex.FindStringSubmatch(rangeStr)
 	if len(match) == 0 {

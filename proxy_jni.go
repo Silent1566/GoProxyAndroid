@@ -22,6 +22,8 @@ var (
 	serverRunning bool
 )
 
+// Java_com_github_catvod_spider_GoProxyLibrary_startProxy
+// 供 Android 侧通过 JNI 调用，用于启动 Go 代理服务。
 //export Java_com_github_catvod_spider_GoProxyLibrary_startProxy
 func Java_com_github_catvod_spider_GoProxyLibrary_startProxy(cPort C.int) C.int {
 	port := int(cPort)
@@ -32,10 +34,12 @@ func Java_com_github_catvod_spider_GoProxyLibrary_startProxy(cPort C.int) C.int 
 	serverMu.Lock()
 	if serverRunning {
 		serverMu.Unlock()
+		// 已经处于运行状态时返回 1，避免重复启动。
 		return C.int(1)
 	}
 	serverMu.Unlock()
 
+	// 注册一次 HTTP 路由，供 JNI 版本的本地服务使用。
 	setupRoutes()
 
 	server = &http.Server{
@@ -60,6 +64,8 @@ func Java_com_github_catvod_spider_GoProxyLibrary_startProxy(cPort C.int) C.int 
 	return C.int(0)
 }
 
+// Java_com_github_catvod_spider_GoProxyLibrary_stopProxy
+// 供 Android 侧停止当前运行中的 Go 代理服务。
 //export Java_com_github_catvod_spider_GoProxyLibrary_stopProxy
 func Java_com_github_catvod_spider_GoProxyLibrary_stopProxy() C.int {
 	serverMu.Lock()
@@ -83,6 +89,8 @@ func Java_com_github_catvod_spider_GoProxyLibrary_stopProxy() C.int {
 	return 0
 }
 
+// Java_com_github_catvod_spider_GoProxyLibrary_isProxyRunning
+// 返回当前 Go 代理在 JNI 模式下是否仍被标记为运行中。
 //export Java_com_github_catvod_spider_GoProxyLibrary_isProxyRunning
 func Java_com_github_catvod_spider_GoProxyLibrary_isProxyRunning() C.int {
 	serverMu.Lock()
@@ -93,6 +101,8 @@ func Java_com_github_catvod_spider_GoProxyLibrary_isProxyRunning() C.int {
 	return 0
 }
 
+// setupRoutes 为 JNI 运行模式注册 HTTP 路由。
+// 它和独立运行模式中的接口保持一致，方便上层统一接入。
 func setupRoutes() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ok")
@@ -120,10 +130,12 @@ func setupRoutes() {
 
 		player := NewPlayer(r.Header, t, c, url)
 		if err := player.Play(w, r.Context()); err != nil {
+			// 已经进入流式输出阶段时，只记录日志，不额外改写响应体。
 			log.Printf("播放错误: %v", err)
 		}
 	})
 
+	// 供 Java 层快速探活，避免仅凭端口占用判断代理状态。
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status": "healthy", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))

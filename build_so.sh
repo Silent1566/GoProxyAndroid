@@ -33,6 +33,16 @@ fi
 NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin"
 echo "使用工具链: $NDK_BIN"
 
+GOHOSTARCH="$(go env GOHOSTARCH)"
+GOVERSION="$(go env GOVERSION)"
+echo "GOHOSTARCH: $GOHOSTARCH"
+echo "GOVERSION: $GOVERSION"
+if [ "$GOHOSTARCH" = "386" ]; then
+    echo "错误: 检测到 32 位 Go 工具链。编译 Android arm/arm64 JNI .so 需要 64 位主机 Go。"
+    echo "请安装 64 位 Go 后再执行 build_so.sh"
+    exit 1
+fi
+
 mkdir -p "$BUILD_DIR"
 
 # 编译目标: arm64-v8a 和 armeabi-v7a

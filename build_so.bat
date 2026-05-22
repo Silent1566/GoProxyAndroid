@@ -19,11 +19,21 @@ if not exist "%NDK_ROOT%\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-lin
 set "NDK_BIN=%NDK_ROOT%\toolchains\llvm\prebuilt\windows-x86_64\bin"
 echo NDK: %NDK_BIN%
 
-set "GO_EXE=C:\Program Files (x86)\Go\bin\go.exe"
+set "GO_EXE=C:\Program Files\Go\bin\go.exe"
 if not exist "%GO_EXE%" (
     set "GO_EXE=go"
 )
 echo GO: %GO_EXE%
+
+for /f %%i in ('"%GO_EXE%" env GOHOSTARCH') do set "GOHOSTARCH=%%i"
+for /f %%i in ('"%GO_EXE%" env GOVERSION') do set "GOVERSION=%%i"
+echo GOHOSTARCH: %GOHOSTARCH%
+echo GOVERSION: %GOVERSION%
+if /i "%GOHOSTARCH%"=="386" (
+    echo ERROR: Detected 32-bit Go toolchain. Building Android arm/arm64 JNI .so requires a 64-bit host Go installation.
+    echo Please install 64-bit Go and update GO_EXE in build_so.bat.
+    exit /b 1
+)
 
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 

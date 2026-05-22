@@ -50,7 +50,7 @@ func main() {
 	// 健康检查接口，方便上层轮询代理是否正常可用。
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status": "healthy", "timestamp": "%s"}`, time.Now().Format(time.RFC3339))
+		fmt.Fprintf(w, `{"status": "healthy", "type": "go", "port": %d, "timestamp": "%s"}`, 5575, time.Now().Format(time.RFC3339))
 	})
 
 	log.SetOutput(os.Stdout)

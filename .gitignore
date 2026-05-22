@@ -1,0 +1,10 @@
+build/
+android-ndk-r26b/
+*.zip
+*.log
+*.exe
+*.dll
+*.so
+*.h
+.idea/
+.vscode/
